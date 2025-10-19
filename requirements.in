@@ -1,0 +1,16 @@
+# simulation
+pgzero
+
+# data processing
+pandas
+openpyxl
+
+# utils
+logzero
+black
+isort
+invoke
+
+# jupyter notebook
+ipykernel
+notebook

@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>PSA CodeSprint 2025&colon; Smart Port Operations &ndash; AI for Horizontal Transport Optimisation &lpar;Node&rpar;</title>
+            <style>
+/* From extension vscode.github */
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.vscode-dark img[src$=\#gh-light-mode-only],
+.vscode-light img[src$=\#gh-dark-mode-only],
+.vscode-high-contrast:not(.vscode-high-contrast-light) img[src$=\#gh-light-mode-only],
+.vscode-high-contrast-light img[src$=\#gh-dark-mode-only] {
+	display: none;
+}
+
+</style>
+            
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/markdown.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/Microsoft/vscode/extensions/markdown-language-features/media/highlight.css">
+<style>
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;
+                font-size: 14px;
+                line-height: 1.6;
+            }
+        </style>
+        <style>
+.task-list-item {
+    list-style-type: none;
+}
+
+.task-list-item-checkbox {
+    margin-left: -20px;
+    vertical-align: middle;
+    pointer-events: none;
+}
+</style>
+<style>
+:root {
+  --color-note: #0969da;
+  --color-tip: #1a7f37;
+  --color-warning: #9a6700;
+  --color-severe: #bc4c00;
+  --color-caution: #d1242f;
+  --color-important: #8250df;
+}
+
+</style>
+<style>
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-note: #2f81f7;
+    --color-tip: #3fb950;
+    --color-warning: #d29922;
+    --color-severe: #db6d28;
+    --color-caution: #f85149;
+    --color-important: #a371f7;
+  }
+}
+
+</style>
+<style>
+.markdown-alert {
+  padding: 0.5rem 1rem;
+  margin-bottom: 16px;
+  color: inherit;
+  border-left: .25em solid #888;
+}
+
+.markdown-alert>:first-child {
+  margin-top: 0
+}
+
+.markdown-alert>:last-child {
+  margin-bottom: 0
+}
+
+.markdown-alert .markdown-alert-title {
+  display: flex;
+  font-weight: 500;
+  align-items: center;
+  line-height: 1
+}
+
+.markdown-alert .markdown-alert-title .octicon {
+  margin-right: 0.5rem;
+  display: inline-block;
+  overflow: visible !important;
+  vertical-align: text-bottom;
+  fill: currentColor;
+}
+
+.markdown-alert.markdown-alert-note {
+  border-left-color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-note .markdown-alert-title {
+  color: var(--color-note);
+}
+
+.markdown-alert.markdown-alert-important {
+  border-left-color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-important .markdown-alert-title {
+  color: var(--color-important);
+}
+
+.markdown-alert.markdown-alert-warning {
+  border-left-color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-warning .markdown-alert-title {
+  color: var(--color-warning);
+}
+
+.markdown-alert.markdown-alert-tip {
+  border-left-color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-tip .markdown-alert-title {
+  color: var(--color-tip);
+}
+
+.markdown-alert.markdown-alert-caution {
+  border-left-color: var(--color-caution);
+}
+
+.markdown-alert.markdown-alert-caution .markdown-alert-title {
+  color: var(--color-caution);
+}
+
+</style>
+        
+        </head>
+        <body class="vscode-body vscode-light">
+            <h1 id="psa-codesprint-2025-smart-port-operations--ai-for-horizontal-transport-optimisation-node">PSA CodeSprint 2025: Smart Port Operations – AI for Horizontal Transport Optimisation (Node)</h1>
+<p>Design an AI-driven scheduling and routing strategy to minimize congestion, balance yard utilization and improve overall efficiency.</p>
+<h2 id="environment-setup">Environment Setup</h2>
+<p>Before working on the problem, please create a Python virtual environment and install all required dependencies.</p>
+<p>If you are familiar with Python environments, you can directly install from <code>requirements.txt</code>. Otherwise, follow these step-by-step instructions in your Command Prompt (Windows):</p>
+<pre><code class="language-shell"><span class="hljs-meta prompt_"># </span><span class="language-bash">Create a Python virtual environment. Here I used Python 3.11.</span>
+python -m pip install virtualenv
+python -m virtualenv py_env_codesprint
+py_env_codesprint\Scripts\activate
+<span class="hljs-meta prompt_">
+# </span><span class="language-bash">Install pip-tools to manage dependencies</span>
+python -m pip install pip-tools
+<span class="hljs-meta prompt_">
+# </span><span class="language-bash">Compile and synchronize dependencies from requirements.in to requirements.txt</span>
+pip-compile -v --rebuild -o requirements.txt --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org
+pip-sync requirements.txt
+<span class="hljs-meta prompt_">
+# </span><span class="language-bash">(Optional) Set up Jupyter kernel <span class="hljs-keyword">for</span> experimenting with notebooks</span>
+python -m ipykernel install --user --name=py_env_codesprint_kernel
+</code></pre>
+<p>To activate your environment:</p>
+<pre><code class="language-shell">py_env_codesprint\Scripts\activate
+</code></pre>
+<h2 id="development">Development</h2>
+<p>To get started, run the simulation with a GUI by executing:</p>
+<pre><code class="language-shell">python gui.py
+</code></pre>
+<p>You will see a simulation of the port terminal operations.</p>
+<h3 id="about-the-code-base">About the Code Base</h3>
+<p>The simulation consists of two main components:</p>
+<ul>
+<li><strong>Planning Engine</strong>: Where scheduling and navigating algorithms are implemented.</li>
+<li><strong>Operation Engine</strong>: Simulates execution of planned jobs.</li>
+</ul>
+<p>Your task is to improve the default planning algorithm in the Planning Engine for better performance.</p>
+<h3 id="project-structure">Project Structure</h3>
+<pre><code>INA_DS_CS/
+│
+├── data/
+│ └── input.csv # Input job details for the planning algorithm
+├── logs/       # Log files for each simulation run
+├── src/        # Source code
+│ └── operate/
+│ ├── plan/
+| |  └── job_planner.py # Your main implementation goes here!
+│ ├── ui/
+│ └── utils/
+├── cli.py      # Command-line interface entry point
+└── gui.py      # GUI interface entry point
+</code></pre>
+<ul>
+<li><code>input.csv</code> contains the job details fed into the planning algorithm.</li>
+<li><code>job_planner.py</code> is the core of the Planning Engine — your modifications should be made here (Search for <strong>YOUR TASK HERE</strong>). Refer to the provided documentation for details on the default algorithm logic.</li>
+<li><code>gui.py</code> runs the simulation with a graphical interface so you can observe and fine-tune your algorithm. You can adjust <code>number_of_refresh_per_physical_second</code> in the code to control simulation speed.</li>
+<li><code>cli.py</code> runs the simulation without GUI for faster batch execution. It outputs <code>output.csv</code> in the data folder and logs in <code>logs/</code>.</li>
+</ul>
+<h3 id="running-the-cli-simulation">Running the CLI simulation</h3>
+<p>Run:</p>
+<pre><code>python cli.py
+</code></pre>
+<p>The simulation may take a few minutes. At the end, it will report the total simulation time (e.g., 1,167,610 seconds) — <strong>this is the key metric you need to optimize and reduce</strong>. Note that this is the simulation time when system checks for all job completion condition. A precise time of the last job completion can be found in <code>end_time</code> column of <code>output.csv</code> file.</p>
+<h2 id="submission-guidelines">Submission Guidelines</h2>
+<p>When you are ready to submit your solution, please prepare the following:</p>
+<ol>
+<li>YouTube Presentation video explaining your solution.</li>
+<li>PowerPoint Slides supporting your presentation.</li>
+<li>Source Code:
+<ul>
+<li>Modified <code>job_planner.py</code> plus any supporting scripts that depend only on <code>job_planner.py</code>.</li>
+<li>Other modifications outside of this are not allowed.</li>
+<li>Zip these files into Codes_TeamName.zip.</li>
+<li>Include a <code>README.txt</code> describing how to run your code and integrate it into the existing codebase.</li>
+</ul>
+</li>
+<li>Simulation Results:
+<ul>
+<li><code>data/output.csv</code></li>
+<li>the latest log file from <code>logs/</code> demonstrating your improved results.</li>
+</ul>
+</li>
+<li>Team Photos.</li>
+</ol>
+<hr>
+<p>If you have any questions or need assistance, feel free to reach out. Good luck and happy coding!</p>
+
+            
+            
+        </body>
+        </html>

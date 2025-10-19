@@ -1,0 +1,23 @@
+# Ignore Python bytecode files
+*.pyc
+__pycache__/
+
+# Ignore all .logs files in logs/ folder
+logs/*.log
+# Do NOT ignore 
+!logs/
+!logs/.gitkeep
+
+# Ignore all .csv / .xlsx in data/folder
+data/*.csv
+data/*.xlsx
+!data/
+!data/input.csv
+
+# Ignore all images in subfolders of images folder
+images/archive
+images/remove_background
+images/usable
+
+# Ignore all notebooks
+notebook

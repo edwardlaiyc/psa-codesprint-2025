@@ -31,9 +31,10 @@ class JobPlanner:
         self.sector_map_snapshot = sector_map_snapshot
         self._yard_selector_params: Dict[str, Any] = dict(
             max_capacity=700,
-            decay_rate=0.04,
-            idle_exploration_bonus=0.35,
-            congestion_penalty_scale=5.0,
+            decay_rate=0.039,
+            idle_exploration_bonus=0.363,
+            congestion_penalty_scale=4.502,
+            distance_weight=0.281,
         )
         self._yard_selector_ai = AdaptiveYardSelector(**self._yard_selector_params)
         self._ht_selector_params: Dict[str, Any] = dict(
@@ -109,16 +110,18 @@ class JobPlanner:
                 break
             selected_HT_names.append(HT_name)
 
+            buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
+
             # select yard if the job is DISCHARGE
             if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
-                yard_name = self.select_yard(yard_name, alt_yard_names)
+                yard_name = self.select_yard(yard_name, alt_yard_names, buffer_coord)
+
 
             # record the assigned HT and yard
             job.assign_job(HT_name=HT_name, yard_name=yard_name)
 
             # construct the job instructions
             job_instructions = list()
-            buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
 
             # For DI job
             if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
@@ -318,14 +321,22 @@ class JobPlanner:
         )
 
     # YARD ASSIGNMENT LOGIC:
-    def select_yard(self, yard_name: str, alt_yard_name: List[str]) -> str:
+    def select_yard(self, yard_name: str, alt_yard_name: List[str], source_coord: Coordinate,) -> str:
         """
         Uses an adaptive AI-driven strategy to balance the workload among jobs.
 
         Keeps a running estimate of how busy each yard is. This estimate decays over time.
         Assigns new jobs so no single yard becomes overloaded (over 700 jobs).
         """
-        selected_yard = self._yard_selector_ai.choose(yard_name, alt_yard_name)
+        def _distance_lookup(candidate: str) -> float:
+            yard_coord = self.sector_map_snapshot.get_yard_sector(candidate).in_coord
+            return abs(yard_coord.x - source_coord.x) + abs(yard_coord.y - source_coord.y)
+        
+        selected_yard = self._yard_selector_ai.choose(
+            yard_name,
+            alt_yard_name,
+            distance_lookup=_distance_lookup,
+        )
 
         yard_snapshot = self._yard_selector_ai.get_state_snapshot().get(selected_yard, {})
         if yard_snapshot.get("load_estimate", 0.0) >= self._yard_selector_ai.max_capacity:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, Iterable, List
+from typing import Callable, Deque, Dict, Iterable, List, Optional
 
 
 @dataclass
@@ -39,14 +39,18 @@ class AdaptiveYardSelector:
         decay_rate: float = 0.04,
         idle_exploration_bonus: float = 0.35,
         congestion_penalty_scale: float = 5.0,
+        distance_weight: float = 0.0,
     ):
         if not 0.0 <= decay_rate < 1.0:
             raise ValueError("decay_rate must be within [0, 1).")
+        if distance_weight < 0.0:
+            raise ValueError("distance_weight must be non-negative.")
 
         self.max_capacity = max_capacity
         self.decay_rate = decay_rate
         self.idle_exploration_bonus = idle_exploration_bonus
         self.congestion_penalty_scale = congestion_penalty_scale
+        self.distance_weight = distance_weight
 
         self._step: int = 0
         self._yard_state: Dict[str, YardState] = {}
@@ -69,7 +73,11 @@ class AdaptiveYardSelector:
             if state.load_estimate < 1e-3:
                 state.load_estimate = 0.0
 
-    def _score(self, yard: str) -> float:
+    def _score(
+        self,
+        yard: str,
+        distance_lookup: Optional[Callable[[str], float]] = None,
+    ) -> float:
         state = self._yard_state[yard]
         utilisation = state.load_estimate
         capacity_ratio = utilisation / float(self.max_capacity)
@@ -84,7 +92,11 @@ class AdaptiveYardSelector:
 
         exploration_bonus = self.idle_exploration_bonus * idle_steps
 
-        return utilisation + congestion_penalty - exploration_bonus
+        distance_penalty = 0.0
+        if distance_lookup is not None and self.distance_weight > 0.0:
+            distance_penalty = self.distance_weight * float(distance_lookup(yard))
+
+        return utilisation + congestion_penalty + distance_penalty - exploration_bonus
 
     def _commit_assignment(self, yard: str) -> None:
         state = self._yard_state[yard]
@@ -93,7 +105,12 @@ class AdaptiveYardSelector:
         state.last_step = self._step
         state.recent_assignments.append(self._step)
 
-    def choose(self, primary_yard: str, alternative_yards: Iterable[str]) -> str:
+    def choose(
+        self,
+        primary_yard: str,
+        alternative_yards: Iterable[str],
+        distance_lookup: Optional[Callable[[str], float]] = None,
+    ) -> str:
         """
         Selects the best yard among a set of candidates using the learned congestion policy.
 
@@ -118,7 +135,10 @@ class AdaptiveYardSelector:
         self._ensure_yards(candidates)
         self._advance_time()
 
-        chosen_yard = min(candidates, key=self._score)
+        chosen_yard = min(
+            candidates,
+            key=lambda yard: self._score(yard, distance_lookup=distance_lookup),
+        )
         self._commit_assignment(chosen_yard)
 
         return chosen_yard

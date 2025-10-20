@@ -82,23 +82,3 @@ python cli.py
 ```
 
 The simulation may take a few minutes. At the end, it will report the total simulation time (e.g., 1,167,610 seconds) — **this is the key metric you need to optimize and reduce**. Note that this is the simulation time when system checks for all job completion condition. A precise time of the last job completion can be found in `end_time` column of `output.csv` file.
-
-## Submission Guidelines
-
-When you are ready to submit your solution, please prepare the following:
-
-1. YouTube Presentation video explaining your solution.
-2. PowerPoint Slides supporting your presentation.
-3. Source Code:
-   - Modified `job_planner.py` plus any supporting scripts that depend only on `job_planner.py`.
-   - Other modifications outside of this are not allowed.
-   - Zip these files into Codes_TeamName.zip.
-   - Include a `README.txt` describing how to run your code and integrate it into the existing codebase.
-4. Simulation Results:
-   - `data/output.csv`
-   - the latest log file from `logs/` demonstrating your improved results.
-5. Team Photos.
-
----
-
-If you have any questions or need assistance, feel free to reach out. Good luck and happy coding!

@@ -1,4 +1,4 @@
-from typing import List
+from typing import Any, Dict, List
 
 from logzero import logger
 
@@ -7,6 +7,7 @@ from src.floor import Coordinate, SectorMapSnapshot
 from src.job import InstructionType, Job, JobInstruction
 from src.operators import HT_Coordinate_View
 from src.plan.job_tracker import JobTracker
+from src.plan.yard_selector_ai import AdaptiveYardSelector
 
 
 class JobPlanner:
@@ -28,6 +29,41 @@ class JobPlanner:
     ):
         self.ht_coord_tracker = ht_coord_tracker
         self.sector_map_snapshot = sector_map_snapshot
+        self._yard_selector_params: Dict[str, Any] = dict(
+            max_capacity=700,
+            decay_rate=0.04,
+            idle_exploration_bonus=0.35,
+            congestion_penalty_scale=5.0,
+        )
+        self._yard_selector_ai = AdaptiveYardSelector(**self._yard_selector_params)
+        self._ht_selector_params: Dict[str, Any] = dict(
+            decay_rate=0.123,
+            recency_penalty=5.038,
+            lateral_penalty=5.640,
+            side_preference_penalty=4.290,
+            utilisation_weight=3.195,
+        )
+        self._ht_selector_ai = None
+
+    def configure_ht_selector(self, **params: Any) -> None:
+        """
+        this overrides the parameters used to instantiate the adaptive HT selector.
+
+        calling this after planning starts will reset the cached selector so the
+        next selection cycle uses the updated hyper-parameters.
+        """
+        self._ht_selector_params = params
+        self._ht_selector_ai = None
+
+    def configure_yard_selector(self, **params: Any) -> None:
+        """
+        this overrides the parameters used to instantiate the adaptive yard selector.
+
+        this immediately replaces the cached selector so future selections
+        reflect the updated hyper-parameters.
+        """
+        self._yard_selector_params = params
+        self._yard_selector_ai = AdaptiveYardSelector(**self._yard_selector_params)
 
     def is_deadlock(self):
         return self.ht_coord_tracker.is_deadlock()
@@ -66,7 +102,7 @@ class JobPlanner:
 
             # select HT for the job based on job type, return None if no HT available or applicable
           # HT_name = self.select_HT1(job_type, selected_HT_names, QC_name, yard_name)
-            HT_name = self.select_HT2(job_type, selected_HT_names, QC_name, yard_name)
+            HT_name = self.select_HT(job_type, selected_HT_names, QC_name, yard_name)
 
             # not proceed with job planning if no available HTs
             if HT_name is None:
@@ -242,163 +278,62 @@ class JobPlanner:
 
         return new_jobs
 
-    # HT ASSIGNMENT LOGIC
-    def select_HT1(self, job_type: str, selected_HT_names: List[str], QC_name: str, yard_name: str) -> str:
+    # HT ASSIGNMENT LOGIC    
+    def select_HT(
+        self,
+        job_type: str,
+        selected_HT_names: List[str],
+        QC_name: str,
+        yard_name: str,
+    ) -> str:
         """
-        Selects an available HT (Horizontal Transport) based on the job type and a list of already selected HTs.
+        For Discharge (DI) jobs: it prefers HTs already on the correct QC side and balances workload.
+        For Load (LO) jobs: it focuses only on yard congestion and HT efficiency.
 
-        OLD LOGIC:
-        For a discharge job, the method selects the first unselected HT from the left (start) of the buffer zone.
-        For any other job type, it selects the first unselected HT from the right (end) of the buffer zone.
-
-        NEW LOGIC:
-        #finds HT that is closest to the QC/yard to minimise horizontal travel
-
-
-        Args:
-            job_type (str): The type of job to be processed (e.g., discharge or other).
-            selected_HT_names (List[str]): A list of HT names that are already selected or in use.
-            QC_name (str): Name of QC to go to
-            yard_name (str): Name of yard to go to
-
-        Returns:
-            str or None: The name of the selected HT if one is available; otherwise, None.
+        Helps avoid long detours and spreads out jobs.
         """
-        plannable_HTs = self.ht_coord_tracker.get_available_HTs()
-        selected_HT = None
-        # get coordinates of QC_in and yard_in
-        QC_in_coord = self.sector_map_snapshot.get_QC_sector(QC_name).in_coord
+        available_HTs = [
+            ht
+            for ht in self.ht_coord_tracker.get_available_HTs()
+            if ht not in selected_HT_names
+        ]
+        if not available_HTs:
+            return None
+
+        from src.plan.ht_selector_ai import AdaptiveHTSelector
+
+        if self._ht_selector_ai is None:
+            self._ht_selector_ai = AdaptiveHTSelector(**self._ht_selector_params)
+
+        qc_sector = self.sector_map_snapshot.get_QC_sector(QC_name)
         yard_in_coord = self.sector_map_snapshot.get_yard_sector(yard_name).in_coord
 
-        # if DI job, track the closest HT to QC_in
-        if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
-            max_x = 1
-            for HT_name in plannable_HTs:
-                if HT_name not in selected_HT_names:
-                    buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-                    selected_HT = HT_name
-                    # as long as HT is still left of QC, move right until
-                    # we are just to the right of QC
-                    # we then have the HT closest to the QC
-                    if buffer_coord.x < QC_in_coord.x:
-                        if buffer_coord.x > max_x:
-                            selected_HT = HT_name
-                            max_x = buffer_coord.x
-            
-        # if LO job, track closest HT to yard_in
-        else:
-            max_x = 1
-            for HT_name in plannable_HTs[::-1]:
-                if HT_name not in selected_HT_names:
-                    buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-                    selected_HT = HT_name
-                    # similarly, iterate right until we find the HT
-                    # just to the right of the yard
-                    if buffer_coord.x < yard_in_coord.x:
-                        if buffer_coord.x > max_x:
-                            selected_HT = HT_name
-                            max_x = buffer_coord.x
-        return selected_HT
-    
-    def select_HT2(self, job_type: str, selected_HT_names: List[str], QC_name: str, yard_name: str) -> str:
-        """
-        Selects an available HT (Horizontal Transport) based on the job type and a list of already selected HTs.
-        
-        OLD LOGIC:
-        For a discharge job, the method selects the first unselected HT from the left (start) of the buffer zone.
-        For any other job type, it selects the first unselected HT from the right (end) of the buffer zone.
-
-        NEW LOGIC:
-        This version finds the leftmost HT available
-        Chosen HT can go straight up, and right, to the QC
-        Gives the best timing currently
-
-        Args:
-            job_type (str): The type of job to be processed (e.g., discharge or other).
-            selected_HT_names (List[str]): A list of HT names that are already selected or in use.
-            QC_name (str): Name of QC to go to
-            yard_name (str): Name of yard to go to
-
-        Returns:
-            str or None: The name of the selected HT if one is available; otherwise, None.
-        """
-        plannable_HTs = self.ht_coord_tracker.get_available_HTs()
-        selected_HT = None
-        QC_in_coord = self.sector_map_snapshot.get_QC_sector(QC_name).in_coord
-        yard_in_coord = self.sector_map_snapshot.get_yard_sector(yard_name).in_coord
-
-        # if DI job, pick the HT on far left of buffer zone
-        if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
-            max_x = 1
-            for HT_name in plannable_HTs:
-                if HT_name not in selected_HT_names:
-                    buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-                    selected_HT = HT_name
-                    #the first HT that is to the left of the QC, use that HT
-                    if buffer_coord.x < QC_in_coord.x:
-                        break
-                        if buffer_coord.x > max_x:
-                            selected_HT = HT_name
-                            max_x = buffer_coord.x
-            
-        # otherwise far right
-        else:
-            max_x = 1
-            for HT_name in plannable_HTs[::-1]:
-                if HT_name not in selected_HT_names:
-                    buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-                    selected_HT = HT_name
-                    #the first HT that is left of the yard, use that HT
-                    if buffer_coord.x < yard_in_coord.x:
-                        break
-                        if buffer_coord.x > max_x:
-                            selected_HT = HT_name
-                            max_x = buffer_coord.x
-        return selected_HT
+        return self._ht_selector_ai.choose(
+            job_type=job_type,
+            available_hts=available_HTs,
+            selected_hts=selected_HT_names,
+            get_coord=self.ht_coord_tracker.get_coordinate,
+            qc_coord=qc_sector.in_coord,
+            yard_coord=yard_in_coord,
+        )
 
     # YARD ASSIGNMENT LOGIC:
     def select_yard(self, yard_name: str, alt_yard_name: List[str]) -> str:
-        
         """
-        OLD LOGIC:
-        Selects a yard for use. Currently, simply returns the provided yard name.
+        Uses an adaptive AI-driven strategy to balance the workload among jobs.
 
-        NEW LOGIC:
-        Select yard based on the one with the lowest current count.
-        To ensure even distribution, reduce congestion, ensure the 700 limit not exceeded.
-
-        Args:
-            yard_name (str): The name of the yard to select.
-            alt_yard_name (str): Name of alternative yards to select.
-
-        Returns:
-            str: The selected yard name.
+        Keeps a running estimate of how busy each yard is. This estimate decays over time.
+        Assigns new jobs so no single yard becomes overloaded (over 700 jobs).
         """
-        # create dict to store count for all yards
-        if not hasattr(self, 'yard_DI_job_count'):
-            self.yard_DI_job_count = {}
+        selected_yard = self._yard_selector_ai.choose(yard_name, alt_yard_name)
 
-        # list of yards to select from
-        yard_list = [yard_name] + alt_yard_name
+        yard_snapshot = self._yard_selector_ai.get_state_snapshot().get(selected_yard, {})
+        if yard_snapshot.get("load_estimate", 0.0) >= self._yard_selector_ai.max_capacity:
+            logger.warning(
+                f"Yard {selected_yard} is above capacity estimate "
+                f"({yard_snapshot['load_estimate']:.0f}/{self._yard_selector_ai.max_capacity})."
+            )
 
-        # create entry in dict for each yard if does not already exist
-        for yard in yard_list:
-            if yard not in self.yard_DI_job_count:
-                self.yard_DI_job_count[yard]  = 0
-        
-        # create sorted list of (yard, count) from lowest to highest count
-        yard_job_count = {key: value for key, value in self.yard_DI_job_count.items() if key in yard_list }
-        yard_job_count = sorted(yard_job_count.items(), key=lambda item: item[1])
-
-        # select the yard with the lowest count
-        selected_yard = yard_job_count[0][0]
-
-        #  the count of that yard
-        self.yard_DI_job_count[selected_yard] += 1
-
-        # print if count of selected yard exceeds 700
-        if self.yard_DI_job_count[selected_yard] >= 700:
-            print(self.yard_DI_job_count[selected_yard])
         return selected_yard
 
     # NAVIGATION LOGIC
@@ -423,8 +358,9 @@ class JobPlanner:
         4. Travels east to the IN coordinate of the specified QC.
 
         If HT is on the left of the QC,
-        1. Moves straight up from buffer to lane 4
-        2. Travels east to the IN coordinate of the specified QC.
+        1. Moves straight up from buffer to lane 5
+        2. Travels east to the below the specified QC_IN.
+        3. Travel north to QC_IN.
 
         Args:
             buffer_coord (Coordinate): The starting coordinate in the buffer zone.
@@ -459,13 +395,14 @@ class JobPlanner:
             # go straight up to upper boundary
             up_path_x = buffer_coord.x
             path = []
-            path.extend([Coordinate(up_path_x, y) for y in range(5, 3, -1)])
+            path.extend([Coordinate(up_path_x, 5)])
             
             # navigate to QC_in
-            qc_travel_lane_y = 4
+            qc_travel_lane_y = 5
             path.extend(
                 [Coordinate(x, qc_travel_lane_y) for x in range(up_path_x + 1, QC_in_coord.x + 1, 1)]
             )
+            path.extend([Coordinate(QC_in_coord.x, 4) for y in range(4, 5, 1)])
 
         path.append(QC_in_coord)
 
@@ -627,12 +564,24 @@ class JobPlanner:
         """
         Generates a path from a Quay Crane (QC) OUT coordinate to a buffer location.
 
+        OLD LOGIC:
         The path follows this route:
         1. Starts at the QC OUT coordinate.
         2. Moves south to the QC travel lane (y = 4).
         3. Travels east along the QC travel lane to the right boundary.
         4. Moves south to the Highway Left lane (y = 7).
         5. Travels west along the highway left lane to the buffer coordinate.
+
+        NEW LOGIC:
+        If buffer to the right of QC:
+        1. Move south to lane 5
+        2. Move east to above buffer coord
+
+        If buffer to the left of QC:
+        1. Move south to lane 4
+        2. Move east to right boundary
+        3. Move south to lane 7
+        4. Move west to below buffer coord
 
         Args:
             QC_name (str): The name of the Quay Crane from which the path starts.
@@ -645,24 +594,32 @@ class JobPlanner:
 
         # go to QC_out first
         path = [QC_out_coord]
-            
-        # go South to take QC Travel Lane
-        qc_travel_lane_y = 4
-        path.append(Coordinate(QC_out_coord.x, qc_travel_lane_y))
-        # move all the way to right boundary
-        path.extend(
-            [Coordinate(x, qc_travel_lane_y) for x in range(QC_out_coord.x + 1, 43, 1)]
-        )
 
-        # go down to Highway Left lane(7), then takes left most
-        down_path_x = 42
-        path.extend([Coordinate(down_path_x, y) for y in range(5, 8, 1)])
+        # buffer to the right of QC_out
+        if buffer_coord.x >= QC_out_coord.x:
+            # go down to lane 5
+            down_path = QC_out_coord.x
+            path.extend([Coordinate(down_path, y) for y in range(4, 6, 1)])
+            # move east to above buffer coord
+            path.extend([Coordinate(x, 5) for x in range(down_path + 1, buffer_coord.x + 1, 1)])
+        else:            
+            # go South to take QC Travel Lane
+            qc_travel_lane_y = 4
+            path.append(Coordinate(QC_out_coord.x, qc_travel_lane_y))
+            # move all the way to right boundary
+            path.extend(
+                [Coordinate(x, qc_travel_lane_y) for x in range(QC_out_coord.x + 1, 43, 1)]
+            )
 
-        # navigate back to buffer
-        highway_lane_y = 7
-        path.extend(
-            [Coordinate(x, highway_lane_y) for x in range(41, buffer_coord.x - 1, -1)]
-        )
+            # go down to Highway Left lane(7), then takes left most
+            down_path_x = 42
+            path.extend([Coordinate(down_path_x, y) for y in range(5, 8, 1)])
+
+            # navigate back to buffer
+            highway_lane_y = 7
+            path.extend(
+                [Coordinate(x, highway_lane_y) for x in range(41, buffer_coord.x - 1, -1)]
+            )
         path.append(buffer_coord)
 
         return path

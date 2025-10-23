@@ -20,6 +20,8 @@ PARAM_NAMES: Sequence[str] = [
     "lateral_penalty",
     "side_preference_penalty",
     "utilisation_weight",
+    "qc_distance_weight",
+    "yard_distance_weight",
 ]
 
 DEFAULT_RANGES: Dict[str, Tuple[float, float]] = {
@@ -28,6 +30,8 @@ DEFAULT_RANGES: Dict[str, Tuple[float, float]] = {
     "lateral_penalty": (4.0, 9.0),
     "side_preference_penalty": (1.5, 6.0),
     "utilisation_weight": (1.0, 3.5),
+    "qc_distance_weight": (0.5, 2.0),
+    "yard_distance_weight": (0.5, 2.0),
 }
 
 
@@ -237,6 +241,10 @@ def main() -> None:
     parser.add_argument("--side-range", type=float, nargs=2, default=None)
     parser.add_argument("--utilisation-weight", type=float, default=None)
     parser.add_argument("--utilisation-range", type=float, nargs=2, default=None)
+    parser.add_argument("--qc-weight", type=float, default=None)
+    parser.add_argument("--qc-range", type=float, nargs=2, default=None)
+    parser.add_argument("--yard-weight", type=float, default=None)
+    parser.add_argument("--yard-range", type=float, nargs=2, default=None)
     parser.add_argument(
         "--init-random",
         type=int,
@@ -277,6 +285,8 @@ def main() -> None:
         or DEFAULT_RANGES["side_preference_penalty"],
         "utilisation_weight": args.utilisation_range
         or DEFAULT_RANGES["utilisation_weight"],
+        "qc_distance_weight": args.qc_range or DEFAULT_RANGES["qc_distance_weight"],
+        "yard_distance_weight": args.yard_range or DEFAULT_RANGES["yard_distance_weight"],
     }
 
     fixed_values = {
@@ -285,6 +295,8 @@ def main() -> None:
         "lateral_penalty": args.lateral_penalty,
         "side_preference_penalty": args.side_penalty,
         "utilisation_weight": args.utilisation_weight,
+        "qc_distance_weight": args.qc_weight,
+        "yard_distance_weight": args.yard_weight,
     }
 
     bounds = _build_bounds(fixed_values, ranges)

@@ -1,13 +1,23 @@
-from typing import Any, Dict, List
+import math
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 from logzero import logger
 
 from src.constant import CONSTANT
 from src.floor import Coordinate, SectorMapSnapshot
-from src.job import InstructionType, Job, JobInstruction
+from src.job import InstructionType, Job, JobInstruction, Status
 from src.operators import HT_Coordinate_View
 from src.plan.job_tracker import JobTracker
 from src.plan.yard_selector_ai import AdaptiveYardSelector
+
+
+@dataclass
+class PlannerEvent:
+    seq: int
+    severity: str
+    message: str
+    details: Optional[Dict[str, Any]] = None
 
 
 class JobPlanner:
@@ -30,21 +40,31 @@ class JobPlanner:
         self.ht_coord_tracker = ht_coord_tracker
         self.sector_map_snapshot = sector_map_snapshot
         self._yard_selector_params: Dict[str, Any] = dict(
-            max_capacity=700,
+            max_capacity=5,
             decay_rate=0.039,
             idle_exploration_bonus=0.363,
-            congestion_penalty_scale=4.502,
+            congestion_penalty_scale=0.5,
             distance_weight=0.281,
         )
         self._yard_selector_ai = AdaptiveYardSelector(**self._yard_selector_params)
         self._ht_selector_params: Dict[str, Any] = dict(
             decay_rate=0.123,
-            recency_penalty=5.038,
+            recency_penalty=5.0,
             lateral_penalty=5.640,
             side_preference_penalty=4.290,
             utilisation_weight=3.195,
+            qc_distance_weight=1.16,
+            yard_distance_weight=0.131,
         )
         self._ht_selector_ai = None
+        self._event_log: List[PlannerEvent] = []
+        self._event_seq: int = 0
+        self._event_history_limit: int = 250
+        self._di_yards: Dict[str, int] = {}
+        self._yard_expected_totals: Optional[Dict[str, int]] = None
+        self._yard_primary_map: Dict[str, Optional[str]] = {}
+        self._yard_assignment_history: Dict[str, str] = {}
+        self._yard_completed_counts: Dict[str, int] = {}
 
     def configure_ht_selector(self, **params: Any) -> None:
         """
@@ -55,6 +75,11 @@ class JobPlanner:
         """
         self._ht_selector_params = params
         self._ht_selector_ai = None
+        self._emit_event(
+            "info",
+            "HT selector parameters updated",
+            params=self._ht_selector_params,
+        )
 
     def configure_yard_selector(self, **params: Any) -> None:
         """
@@ -65,12 +90,300 @@ class JobPlanner:
         """
         self._yard_selector_params = params
         self._yard_selector_ai = AdaptiveYardSelector(**self._yard_selector_params)
+        self._emit_event(
+            "info",
+            "Yard selector parameters updated",
+            params=self._yard_selector_params,
+        )
+
+    @staticmethod
+    def _normalise_yard_name(value: Optional[Any]) -> Optional[str]:
+        """Convert yard identifiers to clean strings, ignoring blanks/NaNs."""
+        if value is None:
+            return None
+        if isinstance(value, float):
+            if math.isnan(float(value)):
+                return None
+        trimmed = str(value).strip()
+        if not trimmed:
+            return None
+        lowered = trimmed.lower()
+        if lowered in {"nan", "none", "<na>", "null"}:
+            return None
+        return trimmed or None
+
+    def _initialise_yard_totals(self, job_tracker: JobTracker) -> None:
+        if self._yard_expected_totals is not None:
+            return
+
+        totals: Dict[str, int] = {yard: 0 for yard in CONSTANT.YARD_FLOOR.YARD_NAMES}
+        primary_map: Dict[str, Optional[str]] = {}
+        for job_seq, job in job_tracker.job_sequence_map.items():
+            job_info = job.get_job_info()
+            yard = self._normalise_yard_name(job_info.get("yard_name"))
+            if yard:
+                totals.setdefault(yard, 0)
+                totals[yard] += 1
+            primary_map[job_seq] = yard
+            for alt in job_info.get("alt_yard_names") or []:
+                alt_name = self._normalise_yard_name(alt)
+                if alt_name:
+                    totals.setdefault(alt_name, 0)
+
+        self._yard_primary_map = primary_map
+        self._yard_expected_totals = totals
+        for yard in totals:
+            self._di_yards.setdefault(yard, 0)
+
+    def _compute_yard_completed_counts(self, job_tracker: JobTracker) -> Dict[str, int]:
+        counts: Dict[str, int] = {yard: 0 for yard in CONSTANT.YARD_FLOOR.YARD_NAMES}
+        for job in job_tracker.job_sequence_map.values():
+            info = job.get_job_info()
+            if info.get("job_status") != Status.COMPLETED:
+                continue
+            yard = self._normalise_yard_name(
+                info.get("assigned_yard_name") or info.get("yard_name")
+            )
+            if not yard:
+                continue
+            counts[yard] = counts.get(yard, 0) + 1
+        return counts
+
+    def _ensure_progress_state(self) -> Dict[str, Any]:
+        progress_state = getattr(self, "_planning_progress", None)
+        yard_targets = self._yard_expected_totals
+        if yard_targets is None:
+            yard_targets = {yard: 0 for yard in CONSTANT.YARD_FLOOR.YARD_NAMES}
+            self._yard_expected_totals = yard_targets
+
+        yard_emit_stride = 1  # update yard progress on every change
+
+        if not isinstance(progress_state, dict):
+            progress_state = {
+                "total_target": 20000,
+                "total_completed": 0,
+                "qc_target": 2500,
+                "qc_counts": {qc: 0 for qc in CONSTANT.QUAY_CRANE_FLOOR.QC_NAMES},
+                "yard_targets": yard_targets,
+                "emit_stride": 100,
+                "last_overall_bucket": -1,
+                "qc_emit_stride": 50,
+                "last_qc_buckets": {},
+                "yard_emit_stride": yard_emit_stride,
+                "last_yard_buckets": {},
+            }
+            setattr(self, "_planning_progress", progress_state)
+        else:
+            progress_state["yard_targets"] = yard_targets
+            progress_state["yard_emit_stride"] = yard_emit_stride
+        return progress_state
+
+    def _emit_progress_update(
+        self,
+        *,
+        increment_total: bool = False,
+        qc_name: Optional[str] = None,
+        force: bool = False,
+    ) -> None:
+        progress_state = self._ensure_progress_state()
+
+        if increment_total:
+            progress_state["total_completed"] += 1
+
+        if qc_name is not None:
+            qc_counts: Dict[str, int] = progress_state["qc_counts"]
+            qc_counts[qc_name] = qc_counts.get(qc_name, 0) + 1
+        else:
+            qc_counts = progress_state["qc_counts"]
+
+        raw_targets: Dict[Any, int] = progress_state["yard_targets"]
+        yard_targets: Dict[str, int] = {}
+        for yard, target in raw_targets.items():
+            normalised = self._normalise_yard_name(yard)
+            if not normalised:
+                continue
+            yard_targets[normalised] = int(target)
+        progress_state["yard_targets"] = yard_targets
+
+        clean_di_counts: Dict[str, int] = {}
+        for yard, count in self._di_yards.items():
+            normalised = self._normalise_yard_name(yard)
+            if not normalised:
+                continue
+            clean_di_counts[normalised] = int(count)
+        self._di_yards = clean_di_counts
+
+        clean_completed: Dict[str, int] = {}
+        for yard, count in (self._yard_completed_counts or {}).items():
+            normalised = self._normalise_yard_name(yard)
+            if not normalised:
+                continue
+            clean_completed[normalised] = int(count)
+        self._yard_completed_counts = clean_completed
+
+        all_yards = set(yard_targets.keys()) | set(clean_di_counts.keys()) | set(clean_completed.keys())
+        yard_completed: Dict[str, int] = {}
+        yard_di_counts: Dict[str, int] = {}
+        for yard in all_yards:
+            yard_targets.setdefault(yard, 0)
+            yard_completed[yard] = clean_completed.get(yard, 0)
+            yard_di_counts[yard] = clean_di_counts.get(yard, 0)
+
+        emit_update = force
+
+        overall_bucket = progress_state["total_completed"] // max(1, progress_state["emit_stride"])
+        if increment_total and overall_bucket != progress_state["last_overall_bucket"]:
+            progress_state["last_overall_bucket"] = overall_bucket
+            emit_update = True
+
+        if qc_name is not None:
+            qc_bucket = qc_counts[qc_name] // max(1, progress_state["qc_emit_stride"])
+            last_qc_bucket = progress_state["last_qc_buckets"].get(qc_name)
+            if last_qc_bucket != qc_bucket:
+                progress_state["last_qc_buckets"][qc_name] = qc_bucket
+                emit_update = True
+            if last_qc_bucket is None:
+                emit_update = True
+
+        yard_emit_stride = max(1, progress_state["yard_emit_stride"])
+        yard_total_changes = False
+        for yard, count in yard_completed.items():
+            bucket = count // yard_emit_stride
+            last_bucket = progress_state["last_yard_buckets"].get(yard)
+            if last_bucket != bucket:
+                progress_state["last_yard_buckets"][yard] = bucket
+                yard_total_changes = True
+        if yard_total_changes:
+            emit_update = True
+
+        if not emit_update:
+            return
+
+        def _render_bar(current: int, total: int, width: int = 30) -> str:
+            safe_total = max(total, 1)
+            ratio = min(max(current / safe_total, 0.0), 1.0)
+            filled = min(width, int(round(ratio * width)))
+            bar = "=" * filled + "-" * (width - filled)
+            current_fmt = f"{current:,}"
+            total_fmt = f"{total:,}" if total > 0 else "0"
+            return f"[{bar}] {ratio * 100:5.1f}% ({current_fmt}/{total_fmt})"
+
+        overall_line = f"Overall {_render_bar(progress_state['total_completed'], progress_state['total_target'])}"
+        qc_lines = [
+            f"{name:<8} {_render_bar(count, progress_state['qc_target'])}"
+            for name, count in sorted(qc_counts.items())
+        ]
+        yard_keys = sorted(all_yards)
+        yard_lines = [
+            f"{yard:<8} {_render_bar(yard_completed.get(yard, 0), yard_targets.get(yard, 0))}  ({yard_completed.get(yard, 0):,}/{yard_targets.get(yard, 0):,} jobs | {yard_di_counts.get(yard, 0):,} DI)"
+            for yard in yard_keys
+        ]
+        progress_block = "\n  ".join(
+            [overall_line, "QC Progress:"]
+            + qc_lines
+            + ["Yard Progress:"]
+            + yard_lines
+        )
+        self._emit_event(
+            "info",
+            f"Planner progress update\n{progress_block}",
+            progress_display=progress_block,
+        )
+
+        try:
+            from src.plan.progress_monitor import get_progress_monitor  # type: ignore
+        except Exception:  # pragma: no cover
+            return
+        try:
+            monitor = get_progress_monitor()
+            monitor.update_progress(
+                overall_completed=progress_state["total_completed"],
+                overall_total=progress_state["total_target"],
+                qc_counts=qc_counts,
+                qc_target=progress_state["qc_target"],
+                yard_completed=yard_completed,
+                yard_di=yard_di_counts,
+                yard_targets=yard_targets,
+            )
+        except Exception:
+            logger.debug("Progress monitor update failed", exc_info=True)
+
+    def _rebalance_yard_totals(
+        self,
+        job_seq: str,
+        primary_yard: Optional[str],
+        selected_yard: Optional[str],
+    ) -> None:
+        primary_yard = self._normalise_yard_name(primary_yard)
+        selected_yard = self._normalise_yard_name(selected_yard)
+        if self._yard_expected_totals is None or not selected_yard:
+            if selected_yard:
+                self._yard_assignment_history[job_seq] = selected_yard
+            return
+
+        totals = self._yard_expected_totals
+        totals.setdefault(selected_yard, 0)
+        if primary_yard:
+            totals.setdefault(primary_yard, 0)
+
+        previous_assignment = self._yard_assignment_history.get(job_seq)
+        if previous_assignment == selected_yard:
+            return
+
+        should_increment_selected = False
+        if previous_assignment is None:
+            if primary_yard and primary_yard != selected_yard:
+                totals[primary_yard] = max(0, totals.get(primary_yard, 0) - 1)
+                should_increment_selected = True
+            elif not primary_yard:
+                should_increment_selected = True
+        else:
+            totals.setdefault(previous_assignment, 0)
+            totals[previous_assignment] = max(0, totals.get(previous_assignment, 0) - 1)
+            should_increment_selected = True
+
+        if should_increment_selected:
+            totals[selected_yard] = totals.get(selected_yard, 0) + 1
+
+        self._yard_assignment_history[job_seq] = selected_yard
+
+    def _update_yard_completion_snapshot(self, job_tracker: JobTracker) -> None:
+        new_counts = self._compute_yard_completed_counts(job_tracker)
+        if new_counts != self._yard_completed_counts:
+            self._yard_completed_counts = new_counts
+            self._emit_progress_update(force=True)
 
     def is_deadlock(self):
         return self.ht_coord_tracker.is_deadlock()
 
     def get_non_moving_HT(self):
         return self.ht_coord_tracker.get_non_moving_HT()
+
+    def get_recent_events(self, limit: int = 50) -> List[PlannerEvent]:
+        """Expose recent planner events so the UI can show status/alerts."""
+        if limit <= 0:
+            return []
+        return self._event_log[-limit:].copy()
+
+    def _emit_event(self, severity: str, message: str, **details: Any) -> None:
+        """Record planner activity and surface through logger for transparency."""
+        self._event_seq += 1
+        event = PlannerEvent(
+            seq=self._event_seq,
+            severity=severity,
+            message=message,
+            details=details or None,
+        )
+        self._event_log.append(event)
+        if len(self._event_log) > self._event_history_limit:
+            self._event_log.pop(0)
+
+        if severity in ("warning", "error", "critical"):
+            log_fn = getattr(logger, severity, None)
+            if callable(log_fn):
+                log_fn("[planner] %s | %s", message, details)
+            else:
+                logger.info("[planner] %s | %s", message, details)
 
     """ YOUR TASK HERE
     Objective: modify the following functions (including input arguments as you see fit) to achieve better planning efficiency.
@@ -86,198 +399,179 @@ class JobPlanner:
     """
 
     def plan(self, job_tracker: JobTracker) -> List[Job]:
-        # logger.info("Planning started.")
+        self._emit_event("info", "Planning cycle started")
         plannable_job_seqs = job_tracker.get_plannable_job_sequences()
-        selected_HT_names = list()  # avoid selecting duplicated HT during the process
-        new_jobs = list()  # container for newly created jobs
+        self._initialise_yard_totals(job_tracker)
+        self._update_yard_completion_snapshot(job_tracker)
+        selected_HT_names: List[str] = []
+        new_jobs: List[Job] = []
 
-        # create job loop: ranging from 0 to at most 16 jobs
-        for job_seq in plannable_job_seqs:
-            # parse job info
-            job = job_tracker.get_job(job_seq)
-            job_info = job.get_job_info()
-            job_type, QC_name, yard_name, alt_yard_names = [
-                job_info[k]
-                for k in ["job_type", "QC_name", "yard_name", "alt_yard_names"]
-            ]
+        ht_assigned_count = 0
+        yard_selected_count = 0
 
-            # select HT for the job based on job type, return None if no HT available or applicable
-          # HT_name = self.select_HT1(job_type, selected_HT_names, QC_name, yard_name)
-            HT_name = self.select_HT(job_type, selected_HT_names, QC_name, yard_name)
-
-            # not proceed with job planning if no available HTs
-            if HT_name is None:
-                break
-            selected_HT_names.append(HT_name)
-
-            buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-
-            # select yard if the job is DISCHARGE
-            if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
-                yard_name = self.select_yard(yard_name, alt_yard_names, buffer_coord)
-
-
-            # record the assigned HT and yard
-            job.assign_job(HT_name=HT_name, yard_name=yard_name)
-
-            # construct the job instructions
-            job_instructions = list()
-
-            # For DI job
-            if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
-
-                # 1. Book QC resource
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.BOOK_QC,
+        try:
+            for job_seq in plannable_job_seqs:
+                job = job_tracker.get_job(job_seq)
+                job_info = job.get_job_info()
+                job_type = job_info["job_type"]
+                QC_name = job_info["QC_name"]
+                primary_yard = self._normalise_yard_name(job_info.get("yard_name"))
+                raw_alt_yards = job_info.get("alt_yard_names") or []
+                alt_yard_names = [
+                    yard
+                    for yard in (
+                        self._normalise_yard_name(alt) for alt in raw_alt_yards
                     )
+                    if yard
+                ]
+                yard_name = primary_yard
+
+                self._emit_event(
+                    "debug",
+                    "Evaluating job for dispatch",
+                    job_seq=job_seq,
+                    job_type=job_type,
+                    qc=QC_name,
+                    yard=yard_name,
+                    alternatives=alt_yard_names,
                 )
 
-                # 2. HT drives from Buffer to QC[IN]
+                HT_name = self.select_HT(
+                    job_type,
+                    selected_HT_names,
+                    QC_name,
+                    yard_name,
+                    alt_yard_names,
+                )
+
+                if HT_name is None:
+                    self._emit_event(
+                        "warning",
+                        "No available HT for job",
+                        job_seq=job_seq,
+                        pending=len(plannable_job_seqs) - len(new_jobs),
+                    )
+                    break
+
+                selected_HT_names.append(HT_name)
                 buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-                path = self.get_path_from_buffer_to_QC(buffer_coord, QC_name)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
+                self._emit_event(
+                    "debug",
+                    "HT allocated",
+                    job_seq=job_seq,
+                    ht=HT_name,
+                    buffer_coord=(buffer_coord.x, buffer_coord.y),
+                )
+                ht_assigned_count += 1
+
+                if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
+                    yard_name = self.select_yard(job_seq, yard_name, alt_yard_names, buffer_coord)
+                    self._emit_event(
+                        "debug",
+                        "Yard selected",
+                        job_seq=job_seq,
+                        yard=yard_name,
+                        alternatives=alt_yard_names,
                     )
+                    yard_selected_count += 1
+                elif yard_name:
+                    yard_selected_count += 1
+
+                job.assign_job(HT_name=HT_name, yard_name=yard_name)
+                job_instructions: List[JobInstruction] = []
+
+                if job_type == CONSTANT.JOB_PARAMETER.DISCHARGE_JOB_TYPE:
+                    job_instructions.append(JobInstruction(instruction_type=InstructionType.BOOK_QC))
+
+                    buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
+                    path = self.get_path_from_buffer_to_QC(buffer_coord, QC_name)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.WORK_QC, HT_name=HT_name, QC_name=QC_name)
+                    )
+
+                    path = self.get_path_from_QC_to_buffer(QC_name, buffer_coord)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                    job_instructions.append(JobInstruction(instruction_type=InstructionType.BOOK_YARD))
+
+                    path = self.get_path_from_buffer_to_yard(buffer_coord, yard_name)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.WORK_YARD, HT_name=HT_name, yard_name=yard_name)
+                    )
+
+                    path = self.get_path_from_yard_to_buffer(yard_name, buffer_coord)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                else:
+                    job_instructions.append(JobInstruction(instruction_type=InstructionType.BOOK_YARD))
+
+                    buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
+                    path = self.get_path_from_buffer_to_yard(buffer_coord, yard_name)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.WORK_YARD, HT_name=HT_name, yard_name=yard_name)
+                    )
+
+                    path = self.get_path_from_yard_to_buffer(yard_name, buffer_coord)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                    job_instructions.append(JobInstruction(instruction_type=InstructionType.BOOK_QC))
+
+                    path = self.get_path_from_buffer_to_QC(buffer_coord, QC_name)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.WORK_QC, HT_name=HT_name, QC_name=QC_name)
+                    )
+
+                    path = self.get_path_from_QC_to_buffer(QC_name, buffer_coord)
+                    job_instructions.append(
+                        JobInstruction(instruction_type=InstructionType.DRIVE, HT_name=HT_name, path=path)
+                    )
+
+                job.set_instructions(job_instructions)
+                new_jobs.append(job)
+                self._emit_event(
+                    "debug",
+                    "Job planned successfully",
+                    job_seq=job_seq,
+                    ht=HT_name,
+                    yard=yard_name,
+                    instructions=len(job_instructions),
                 )
 
-                # 3. Work with QC
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.WORK_QC,
-                        HT_name=HT_name,
-                        QC_name=QC_name,
-                    )
-                )
-
-                # 4. HT drives from QC to Buffer
-                path = self.get_path_from_QC_to_buffer(QC_name, buffer_coord)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-                # 5. Book Yard resource
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.BOOK_YARD,
-                    )
-                )
-
-                # 6. HT drives from Buffer to Yard[IN]
-                path = self.get_path_from_buffer_to_yard(buffer_coord, yard_name)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-                # 7. Work with Yard
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.WORK_YARD,
-                        HT_name=HT_name,
-                        yard_name=yard_name,
-                    )
-                )
-
-                # 8. HT drives from Yard to Buffer
-                path = self.get_path_from_yard_to_buffer(yard_name, buffer_coord)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-            # For LO job
-            else:
-
-                # 1. Book Yard resource
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.BOOK_YARD,
-                    )
-                )
-
-                # 2. HT drives from buffer to Yard[IN]
-                buffer_coord = self.ht_coord_tracker.get_coordinate(HT_name)
-                path = self.get_path_from_buffer_to_yard(buffer_coord, yard_name)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-                # 3. Work with Yard
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.WORK_YARD,
-                        HT_name=HT_name,
-                        yard_name=yard_name,
-                    )
-                )
-
-                # 4. HT drives from Yard to buffer
-                path = self.get_path_from_yard_to_buffer(yard_name, buffer_coord)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-                # 5. Book QC resource
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.BOOK_QC,
-                    )
-                )
-
-                # 6. HT drives from buffer to QC[IN]
-                path = self.get_path_from_buffer_to_QC(buffer_coord, QC_name)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-                # 7. Work with QC
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.WORK_QC,
-                        HT_name=HT_name,
-                        QC_name=QC_name,
-                    )
-                )
-
-                # 8. HT drives from QC to buffer
-                path = self.get_path_from_QC_to_buffer(QC_name, buffer_coord)
-                job_instructions.append(
-                    JobInstruction(
-                        instruction_type=InstructionType.DRIVE,
-                        HT_name=HT_name,
-                        path=path,
-                    )
-                )
-
-            job.set_instructions(job_instructions)
-            new_jobs.append(job)
-            # logger.debug(f"{job}")
+        except Exception as exc:  # pragma: no cover - defensive logging
+            self._emit_event("error", "Planning aborted due to exception", error=str(exc))
+            logger.exception("Planning encountered an exception.")
+            raise
+        else:
+            self._emit_event(
+                "info",
+                "Planning summary",
+                planned=len(new_jobs),
+                ht_assigned=ht_assigned_count,
+                yards_selected=yard_selected_count,
+                pending=len(plannable_job_seqs) - len(new_jobs),
+            )
 
         return new_jobs
 
@@ -287,7 +581,8 @@ class JobPlanner:
         job_type: str,
         selected_HT_names: List[str],
         QC_name: str,
-        yard_name: str,
+        yard_name: Optional[str],
+        alt_yard_names: List[str],
     ) -> str:
         """
         For Discharge (DI) jobs: it prefers HTs already on the correct QC side and balances workload.
@@ -309,43 +604,133 @@ class JobPlanner:
             self._ht_selector_ai = AdaptiveHTSelector(**self._ht_selector_params)
 
         qc_sector = self.sector_map_snapshot.get_QC_sector(QC_name)
-        yard_in_coord = self.sector_map_snapshot.get_yard_sector(yard_name).in_coord
 
-        return self._ht_selector_ai.choose(
+        yard_candidates: List[Coordinate] = []
+        if yard_name:
+            yard_sector = self.sector_map_snapshot.get_yard_sector(yard_name)
+            if yard_sector is not None:
+                yard_candidates.append(yard_sector.in_coord)
+        for alt_name in alt_yard_names:
+            if not alt_name:
+                continue
+            yard_sector = self.sector_map_snapshot.get_yard_sector(alt_name)
+            if yard_sector is None:
+                continue
+            yard_candidates.append(yard_sector.in_coord)
+
+        if not yard_candidates:
+            yard_candidates.append(qc_sector.in_coord)
+
+        chosen_ht = self._ht_selector_ai.choose(
             job_type=job_type,
             available_hts=available_HTs,
             selected_hts=selected_HT_names,
             get_coord=self.ht_coord_tracker.get_coordinate,
             qc_coord=qc_sector.in_coord,
-            yard_coord=yard_in_coord,
+            yard_coords=yard_candidates,
         )
+        if not chosen_ht:
+            return None
+
+        self._emit_progress_update(increment_total=True, qc_name=QC_name)
+
+        return chosen_ht
 
     # YARD ASSIGNMENT LOGIC:
-    def select_yard(self, yard_name: str, alt_yard_name: List[str], source_coord: Coordinate,) -> str:
-        """
-        Uses an adaptive AI-driven strategy to balance the workload among jobs.
+    # def select_yard(
+    #     self,
+    #     yard_name: str,
+    #     alt_yard_name: List[str],
+    #     source_coord: Coordinate,
+    # ) -> str:
+    #     """
+    #     Uses an adaptive AI-driven strategy to balance the workload among jobs.
 
-        Keeps a running estimate of how busy each yard is. This estimate decays over time.
-        Assigns new jobs so no single yard becomes overloaded (over 700 jobs).
-        """
+    #     Keeps a running estimate of how busy each yard is. This estimate decays over time.
+    #     Assigns new jobs so no single yard becomes overloaded (over 700 jobs).
+    #     """
+
+    #     def _distance_lookup(candidate: str) -> float:
+    #         yard_coord = self.sector_map_snapshot.get_yard_sector(candidate).in_coord
+    #         return abs(yard_coord.x - source_coord.x) + abs(yard_coord.y - source_coord.y)
+
+    #     selected_yard = self._yard_selector_ai.choose(
+    #         yard_name,
+    #         alt_yard_name,
+    #         distance_lookup=_distance_lookup,
+    #     )
+
+    #     yard_snapshot = self._yard_selector_ai.get_state_snapshot().get(selected_yard, {})
+    #     if yard_snapshot.get("load_estimate", 0.0) >= self._yard_selector_ai.max_capacity:
+    #         logger.warning(
+    #             f"Yard {selected_yard} is above capacity estimate "
+    #             f"({yard_snapshot['load_estimate']:.0f}/{self._yard_selector_ai.max_capacity})."
+    #         )
+    #         self._emit_event(
+    #             "warning",
+    #             "Selected yard above capacity estimate",
+    #             yard=selected_yard,
+    #             load_estimate=yard_snapshot.get("load_estimate", 0.0),
+    #             capacity=self._yard_selector_ai.max_capacity,
+    #         )
+
+    #     return selected_yard
+    
+    def select_yard(
+        self,
+        job_seq: str,
+        primary_yard: Optional[str],
+        alt_yard_names: List[str],
+        source_coord: Coordinate,
+        capacity: int = 700,
+    ) -> Optional[str]:
+        primary_yard = self._normalise_yard_name(primary_yard)
+        clean_alts = [
+            yard for yard in (self._normalise_yard_name(alt) for alt in (alt_yard_names or [])) if yard
+        ]
+        alt_yard_names = clean_alts
+
+        candidates = [primary_yard, *alt_yard_names]
+        candidates = [yard for yard in candidates if yard]
+        if not candidates:
+            return None
+
+        yard_targets = self._yard_expected_totals
+        if yard_targets is None:
+            yard_targets = {}
+            self._yard_expected_totals = yard_targets
+        for candidate in candidates:
+            self._di_yards.setdefault(candidate, 0)
+            yard_targets.setdefault(candidate, 0)
+
+        available = [candidate for candidate in candidates if self._di_yards[candidate] < capacity]
+        if not available:
+            available = candidates
+
         def _distance_lookup(candidate: str) -> float:
-            yard_coord = self.sector_map_snapshot.get_yard_sector(candidate).in_coord
+            yard_sector = self.sector_map_snapshot.get_yard_sector(candidate)
+            if yard_sector is None:
+                return float("inf")
+            yard_coord = yard_sector.in_coord
             return abs(yard_coord.x - source_coord.x) + abs(yard_coord.y - source_coord.y)
-        
-        selected_yard = self._yard_selector_ai.choose(
-            yard_name,
-            alt_yard_name,
-            distance_lookup=_distance_lookup,
-        )
 
-        yard_snapshot = self._yard_selector_ai.get_state_snapshot().get(selected_yard, {})
-        if yard_snapshot.get("load_estimate", 0.0) >= self._yard_selector_ai.max_capacity:
-            logger.warning(
-                f"Yard {selected_yard} is above capacity estimate "
-                f"({yard_snapshot['load_estimate']:.0f}/{self._yard_selector_ai.max_capacity})."
-            )
+        primary = primary_yard if primary_yard in available else available[0]
+        alts = [candidate for candidate in available if candidate != primary]
+        selected_yard = self._yard_selector_ai.choose(primary, alts, distance_lookup=_distance_lookup)
+
+        previous_assignment = self._yard_assignment_history.get(job_seq)
+        if previous_assignment and previous_assignment != selected_yard:
+            self._di_yards[previous_assignment] = max(0, self._di_yards.get(previous_assignment, 0) - 1)
+
+        if previous_assignment != selected_yard:
+            self._di_yards[selected_yard] = self._di_yards.get(selected_yard, 0) + 1
+
+        self._rebalance_yard_totals(job_seq, primary_yard, selected_yard)
+        self._emit_progress_update(force=True)
 
         return selected_yard
+
+
 
     # NAVIGATION LOGIC
     def get_path_from_buffer_to_QC(

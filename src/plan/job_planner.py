@@ -65,6 +65,7 @@ class JobPlanner:
         self._yard_primary_map: Dict[str, Optional[str]] = {}
         self._yard_assignment_history: Dict[str, str] = {}
         self._yard_completed_counts: Dict[str, int] = {}
+        self._yard_completion_tick: int = 0
 
     def configure_ht_selector(self, **params: Any) -> None:
         """
@@ -402,7 +403,9 @@ class JobPlanner:
         self._emit_event("info", "Planning cycle started")
         plannable_job_seqs = job_tracker.get_plannable_job_sequences()
         self._initialise_yard_totals(job_tracker)
-        self._update_yard_completion_snapshot(job_tracker)
+        self._yard_completion_tick = (self._yard_completion_tick + 1) % 10
+        if self._yard_completion_tick == 0:
+            self._update_yard_completion_snapshot(job_tracker)
         selected_HT_names: List[str] = []
         new_jobs: List[Job] = []
 

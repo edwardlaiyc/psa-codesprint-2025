@@ -638,46 +638,6 @@ class JobPlanner:
         self._emit_progress_update(increment_total=True, qc_name=QC_name)
 
         return chosen_ht
-
-    # YARD ASSIGNMENT LOGIC:
-    # def select_yard(
-    #     self,
-    #     yard_name: str,
-    #     alt_yard_name: List[str],
-    #     source_coord: Coordinate,
-    # ) -> str:
-    #     """
-    #     Uses an adaptive AI-driven strategy to balance the workload among jobs.
-
-    #     Keeps a running estimate of how busy each yard is. This estimate decays over time.
-    #     Assigns new jobs so no single yard becomes overloaded (over 700 jobs).
-    #     """
-
-    #     def _distance_lookup(candidate: str) -> float:
-    #         yard_coord = self.sector_map_snapshot.get_yard_sector(candidate).in_coord
-    #         return abs(yard_coord.x - source_coord.x) + abs(yard_coord.y - source_coord.y)
-
-    #     selected_yard = self._yard_selector_ai.choose(
-    #         yard_name,
-    #         alt_yard_name,
-    #         distance_lookup=_distance_lookup,
-    #     )
-
-    #     yard_snapshot = self._yard_selector_ai.get_state_snapshot().get(selected_yard, {})
-    #     if yard_snapshot.get("load_estimate", 0.0) >= self._yard_selector_ai.max_capacity:
-    #         logger.warning(
-    #             f"Yard {selected_yard} is above capacity estimate "
-    #             f"({yard_snapshot['load_estimate']:.0f}/{self._yard_selector_ai.max_capacity})."
-    #         )
-    #         self._emit_event(
-    #             "warning",
-    #             "Selected yard above capacity estimate",
-    #             yard=selected_yard,
-    #             load_estimate=yard_snapshot.get("load_estimate", 0.0),
-    #             capacity=self._yard_selector_ai.max_capacity,
-    #         )
-
-    #     return selected_yard
     
     def select_yard(
         self,

@@ -1,6 +1,35 @@
-# PSA CodeSprint 2025: Smart Port Operations – AI for Horizontal Transport Optimisation (Node)
+# PSA CodeSprint 2025 - Multi-Agent Path Finding Solution
 
-Design an AI-driven scheduling and routing strategy to minimize congestion, balance yard utilization and improve overall efficiency.
+## Overview
+Problem statement 1 - AI for horizontal transport optimisation
+Solution - a multi-agent path finding (MAPF) problem coordinating 80 horizontal transport vehicles between 8 quay cranes and 16 yard blocks, processing 20,000 container jobs while navigating shared lanes with directional constraints.
+
+## Approach
+
+Two-Phase Optimization Strategy:
+
+1. Hard Heuristics - Custom algorithms for resource allocation:
+   - HT Selector: Distance-based assignment with load balancing, lateral movement penalties, and side preference logic
+   - Yard Selector: Congestion-aware allocation with capacity limits and idle exploration bonuses
+   - Path Planning: Lane-specific routing rules (even lanes down, odd lanes up) to minimize conflicts
+
+2. Bayesian Optimization - Automated hyperparameter tuning:
+   - Gaussian Process surrogate modeling of simulation performance
+   - Expected Improvement acquisition function for parameter exploration
+   - 7 parameters for HT selector, 4 for yard selector
+   - Converged to optimal weights minimizing total simulation time
+
+## Key Files
+
+- src/plan/job_planner.py - Main planning orchestrator with navigation logic
+- src/plan/ht_selector_ai.py - Adaptive HT assignment algorithm
+- src/plan/yard_selector_ai.py - Dynamic yard allocation algorithm
+- src/plan/tune_ht_selector.py - Bayesian optimization for HT parameters
+- src/plan/tune_yard_selector.py - Bayesian optimization for yard parameters
+
+## Results
+
+~45% reduction in simulation time - from approximately 1,160,000 seconds (baseline) to 640,000 seconds through optimized resource allocation and conflict-free path planning.
 
 ## Environment Setup
 
@@ -56,16 +85,24 @@ Your task is to improve the default planning algorithm in the Planning Engine fo
 INA_DS_CS/
 │
 ├── data/
-│ └── input.csv # Input job details for the planning algorithm
-├── logs/       # Log files for each simulation run
-├── src/        # Source code
-│ └── operate/
-│ ├── plan/
-| |  └── job_planner.py # Your main implementation goes here!
-│ ├── ui/
-│ └── utils/
-├── cli.py      # Command-line interface entry point
-└── gui.py      # GUI interface entry point
+│   └── input.csv
+├── logs/
+├── src/
+│   ├── operate/
+│   ├── plan/
+│   │   ├── __init__.py
+│   │   ├── job_planner.py                # Main planning orchestrator with navigation logic
+│   │   ├── job_tracker.py                # Tracks job status, progress, and completion times
+│   │   ├── progress_monitor.py           # Tracks overall progress and runtime statistics
+│   │   ├── ht_selector_ai.py             # Adaptive HT assignment (distance + penalties)
+│   │   ├── yard_selector_ai.py           # Dynamic yard allocation (congestion-aware)
+│   │   ├── tune_ht_selector.py           # Bayesian optimization for HT selector parameters
+│   │   └── tune_yard_selector.py         # Bayesian optimization for yard selector parameters
+│   ├── ui/
+│   └── utils/
+├── cli.py
+└── gui.py
+
 ```
 
 - `input.csv` contains the job details fed into the planning algorithm.

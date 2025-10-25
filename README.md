@@ -1,4 +1,4 @@
-# PSA CodeSprint 2025 - Multi-Agent Path Finding Solution
+# PSA CodeSprint 2025 CHAMPIONS
 
 ## Overview
 Problem statement 1 - AI for horizontal transport optimisation
